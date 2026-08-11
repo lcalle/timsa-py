@@ -1,0 +1,70 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software or its outputs, please cite both the software
+  and the publications listed under references.
+title: "TiMSA — Tidal Inundation Model of Shallow-water Availability"
+abstract: >-
+  A bathtub inundation model that computes, per grid cell, how much time a
+  location spends within a given depth of water over a tidal year, for
+  quantifying time-integrated shallow-water habitat availability.
+type: software
+authors:
+  - family-names: Calle
+    given-names: Leonardo
+    email: leo@calleecology.com
+    affiliation: "CalleEcology, Inc."
+license: LicenseRef-PolyForm-Noncommercial-1.0.0
+license-url: "https://polyformproject.org/licenses/noncommercial/1.0.0"
+repository-code: "https://github.com/lcalle/timsa-py"
+url: "https://leonardo-calle.com"
+keywords:
+  - tidal inundation
+  - shallow-water habitat
+  - intertidal ecology
+  - habitat availability
+  - coastal DEM
+references:
+  - type: article
+    authors:
+      - family-names: Calle
+        given-names: Leonardo
+      - family-names: Green
+        given-names: Laura
+      - family-names: Strong
+        given-names: Aaron
+      - family-names: Gawlik
+        given-names: Dale E.
+    title: >-
+      Time-integrated habitat availability is a resource attribute that
+      informs patterns of use in intertidal areas
+    journal: "Ecological Monographs"
+    year: 2018
+    volume: 88
+    issue: 4
+    start: 600
+    end: 620
+    doi: "10.1002/ecm.1305"
+  - type: article
+    authors:
+      - family-names: Calle
+        given-names: Leonardo
+      - family-names: Gawlik
+        given-names: Dale E.
+      - family-names: Xie
+        given-names: Zhixiao
+      - family-names: Green
+        given-names: Laura
+      - family-names: Lapointe
+        given-names: Brian
+      - family-names: Strong
+        given-names: Aaron
+    title: >-
+      Effects of tidal periodicities and diurnal foraging constraints on the
+      density of foraging wading birds
+    journal: "The Auk"
+    year: 2016
+    volume: 133
+    issue: 3
+    start: 378
+    end: 396
+    doi: "10.1642/AUK-15-234.1"

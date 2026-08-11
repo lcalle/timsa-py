@@ -1,0 +1,95 @@
+# TiMSA — canonical present-day example (one simulation).
+#
+# Documents all three gauge sources. As shipped it runs a CO-OPS simulation;
+# the prescribed and hybrid blocks are commented — switch `source` and
+# uncomment the matching block to use them. No scenarios, horizons, or figures
+# (those belong to the manuscript pipeline). Paths are relative to the project
+# root unless absolute.
+
+domain:
+  name: "lower_keys"
+  # Declare EXACTLY ONE of: bbox, boundary_file, or center (+ radius_km).
+  bbox: [-81.95, 24.45, -80.95, 24.83]   # [lon_min, lat_min, lon_max, lat_max], EPSG:4326
+    # boundary_file: "aoi/lower_keys.geojson"
+    # boundary_layer: null                 # for a multi-layer .gpkg
+    # center: [-81.45, 24.64]              # [lon, lat]; with radius_km, derives a bbox
+    # radius_km: 40                        # half-width in km
+    # shape: "box"                         # box (default) | circle (adds a circular AOI)
+  gauge_search_buffer_km: 40             # how far beyond the AOI to accept gauges
+  resolution_m: 30
+  crs: null                              # null -> UTM zone auto-derived from centroid
+  dem_path: "cache/dem/lower_keys_30m.tif"
+  gauge_zones_path: "cache/dem/gauge_zones_lower_keys_30m.tif"
+  land_mask_path: null
+
+gauges:
+  source: "coops"                        # coops | prescribed | hybrid
+
+  # --- source: coops — fetch from the NOAA CO-OPS API ---------------------
+  stations_csv: null                     # null -> discovered from the domain;
+                                         #         or a CSV to pin/subset stations
+  year:  2025
+  start: "2025-01-01"                    # inclusive; omit -> Jan 1
+  end:   "2025-12-31"                    # inclusive; omit -> Dec 31
+  datum: "MLLW"
+  min_obs_coverage_pct: 80.0
+  cache_dir: "cache/coops"
+  vdatum_csv: null                       # null -> MLLW->NAVD88 resolved via API, cached
+  # record_interval_min: 6               # coops fetch interval (default 6)
+  # hilo_interp: "sinusoidal"            # how hi/lo prediction stations are filled
+
+  # --- source: prescribed — your own water-level table --------------------
+  # Set source: prescribed and uncomment. Columns are gauges; each maps to a
+  # gauge zone by column order (see gauge_zones_path). Interval is independent
+  # of simulation.timestep_min (6, 12, ... min all fine).
+  # prescribed_file: "data/water_levels_2025.csv"
+  # time_col: "time"                     # null if the file has no time column
+  # record_interval_min: 6              # required when time_col is null
+  # station_order: null                 # null -> file column order; or a subset list
+  # fill_gaps: "hold"                   # hold | interpolate | nan
+  # max_gap_records: 240                # refuse to fill gaps longer than N records
+  # value_scale: 1.0                    # 0.3048 to convert feet -> metres
+
+  # --- source: hybrid — in-situ sensors + fetched CO-OPS ------------------
+  # Set source: hybrid and provide BOTH the prescribed keys above AND the
+  # coops keys above, plus the sensor locations below. Column order is
+  # in-situ first (station_order), then kept CO-OPS gauges (by StationID).
+  # sensor_meta_csv: "data/sensors_meta.csv"   # StationID (matching the prescribed
+  #                                            # columns) + Latitude/Longitude
+
+simulation:
+  timestep_min: 6                        # must divide 1440 evenly
+  gauge_interp: "sinusoidal"             # linear | sinusoidal | hold
+                                         # sinusoidal = tide_wdchange.c; use it
+                                         # when records are tidal extrema
+  surface_update: "direct"               # direct | incremental (C parity)
+  gap_policy: "hold"                     # hold | nan
+  constrain_daylight: false
+  daylight_bounds: "inclusive"           # inclusive | exclusive (exclusive = C reference)
+  daylight_table: null                   # null -> computed from domain centroid
+  water_level_offset_m: 0.0              # uniform vertical shift; 0 for present-day
+  cell_chunk: 100000
+
+# Sign convention (C reference): POSITIVE IS DRY.
+#   depth = dem_elevation - water_surface
+#   depth > 0 -> cell stands that far ABOVE the water surface (dry)
+#   depth < 0 -> cell is SUBMERGED by that much water
+# A band covering 0 to 1.5 m of water is therefore [-1.5, 0.0].
+depth_windows:
+  shallow_band: [-1.5, 0.0]
+
+# Refugia thresholds stay POSITIVE: they name a depth of water, not an elevation.
+refugia_thresholds: [0.2, 0.5, 1.0]
+
+output:
+  root: "outputs"
+  rasters: "outputs/rasters"
+  summaries: "outputs/summaries"
+  run_id: "lower_keys_2025"
+  write_annual: true                     # annual accumulators, one file per metric
+  write_total: true                      # raw cell-minutes over the run (C save_sum_raster)
+  write_average: true                    # minutes per day (C save_average_raster)
+  write_daily: false                     # per-day rasters; 365 files PER METRIC
+  daily_dtype: "float32"
+  daily_compress: "lzw"
+  daily_metrics: null                    # null -> all; else a subset of keys
