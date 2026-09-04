@@ -88,7 +88,7 @@ class GaugeConfig:
     vdatum_csv: Path | None = None
     # Last-resort spatial fill for stations no source can resolve: inverse-
     # distance weighting from the resolved stations. Off by default.
-    vdatum_idw_fill: bool = False
+    vdatum_idw_fill: bool = True
     vdatum_idw_power: float = 2.0
     vdatum_idw_k: int | None = None
     hilo_interp: str = "sinusoidal"
