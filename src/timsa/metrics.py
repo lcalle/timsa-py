@@ -37,6 +37,7 @@ import pandas as pd
 from timsa.core import TimsaSimulation
 
 NODATA = -9999.0
+AREA_NODATA = 255          # area_available rasters are uint8 0/1
 
 
 # ---------------------------------------------------------------------------
@@ -263,10 +264,12 @@ def write_metric_rasters(
     n_days = max(int(getattr(run.sim, "n_days", 1)), 1)
     written: list[Path] = []
 
-    def _write(arr: np.ndarray, path: Path) -> None:
-        out = arr.astype(dtype, copy=True)
-        out[~valid] = NODATA
-        with rasterio.open(path, "w", **profile) as dst:
+    def _write(arr: np.ndarray, path: Path, out_dtype: str = dtype,
+               nodata=NODATA) -> None:
+        out = arr.astype(out_dtype, copy=True)
+        out[~valid] = nodata
+        prof = dict(profile, dtype=out_dtype, nodata=nodata)
+        with rasterio.open(path, "w", **prof) as dst:
             dst.write(out, 1)
         written.append(path)
 
@@ -282,7 +285,9 @@ def write_metric_rasters(
         if write_average:
             _write(arr / n_days, paths[("time_average", window)])
         if write_area_binary:
-            _write((arr > 0).astype(np.float32), paths[("area_available", window)])
+            # 0/1 flag: uint8 with 255 as no-data is 4x smaller than float32.
+            _write((arr > 0), paths[("area_available", window)],
+                   out_dtype="uint8", nodata=AREA_NODATA)
 
     for thr, arr in run.sim.time_below_threshold.items():
         if write_total:

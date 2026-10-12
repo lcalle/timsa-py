@@ -44,6 +44,10 @@ def cmd_run(args) -> int:
     print(cfg.report())
 
     if args.dry_run:
+        from timsa.estimate import estimate_run
+        print("\nestimate")
+        for line in estimate_run(cfg).report().splitlines():
+            print(f"      {line}")
         print("\ndry run: configuration is valid; nothing executed")
         return 0
 
@@ -114,6 +118,7 @@ def cmd_run(args) -> int:
         )
 
     sim.run(verbose=True, cell_chunk=cfg.simulation.cell_chunk,
+            chunk_mem_mb=cfg.simulation.chunk_mem_mb,
             daily_callback=writer)
     if writer is not None:
         writer.close()

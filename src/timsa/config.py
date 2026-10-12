@@ -104,7 +104,10 @@ class SimulationConfig:
     daylight_bounds: str = "inclusive"
     daylight_table: Path | None = None
     water_level_offset_m: float = 0.0
-    cell_chunk: int = 100_000
+    # Valid cells per inner block. 'auto' sizes it from chunk_mem_mb so peak
+    # memory stays flat whatever the timestep; an integer is used as given.
+    cell_chunk: int | str = "auto"
+    chunk_mem_mb: float = 256.0
 
 
 @dataclass
@@ -354,7 +357,12 @@ def _parse_simulation(raw: dict) -> SimulationConfig:
     s.water_level_offset_m = float(
         raw.get("water_level_offset_m", s.water_level_offset_m)
     )
-    s.cell_chunk = int(raw.get("cell_chunk", s.cell_chunk))
+    cc = raw.get("cell_chunk", s.cell_chunk)
+    if cc in (None, "", "null", "auto", "Auto", "AUTO"):
+        s.cell_chunk = "auto"
+    else:
+        s.cell_chunk = int(cc)
+    s.chunk_mem_mb = float(raw.get("chunk_mem_mb", s.chunk_mem_mb))
     return s
 
 

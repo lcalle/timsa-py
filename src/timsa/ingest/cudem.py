@@ -342,6 +342,33 @@ def download_cudem_tiles(
 # Mosaic
 # ---------------------------------------------------------------------------
 
+def target_grid(
+    bbox_lonlat: tuple,
+    target_crs: str,
+    target_res_m: float,
+) -> tuple:
+    """
+    Output grid for a lon/lat bbox: (transform, width, height).
+
+    The origin is snapped to whole multiples of the resolution, so the same
+    bbox and resolution always give the same grid regardless of which tiles
+    were downloaded.
+    """
+    import math
+    from rasterio.transform import from_origin
+    from rasterio.warp import transform_bounds
+
+    res = float(target_res_m)
+    left, bottom, right, top = transform_bounds(
+        "EPSG:4326", target_crs, *bbox_lonlat, densify_pts=21
+    )
+    left = math.floor(left / res) * res
+    top = math.ceil(top / res) * res
+    width = max(1, math.ceil((right - left) / res))
+    height = max(1, math.ceil((top - bottom) / res))
+    return from_origin(left, top, res, res), width, height
+
+
 def mosaic_and_reproject_cudem(
     tile_paths: list,
     out_path: str | Path,
@@ -351,19 +378,29 @@ def mosaic_and_reproject_cudem(
     bbox_lonlat: tuple | None = None,
     resampling: str = "bilinear",
     nodata: float = -9999.0,
+    warp_mem_limit_mb: int = 128,
     verbose: bool = True,
 ) -> dict:
     """
-    Mosaic tiles, reproject, and optionally crop to a bbox.
+    Warp tiles straight onto the output grid, one tile at a time.
+
+    The output grid is the domain bbox at `target_res_m` in `target_crs`.
+    Each tile is warped directly into it through GDAL's chunked warper, which
+    reads only the source blocks that overlap the output and holds at most
+    `warp_mem_limit_mb` of working memory. Where tiles overlap, the first
+    tile with data wins (the same rule as rasterio.merge).
+
+    This replaces the earlier merge-then-reproject approach, which loaded
+    every native ~3 m tile into RAM (about 260 MB per 0.25-degree tile) even
+    for a 30 m output. Peak memory is now a few output-sized arrays.
 
     `target_crs` defaults to the UTM zone of the domain centroid rather than a
     fixed EPSG. `target_res_m` and `bbox_lonlat` likewise default from the
-    domain when one is supplied.
+    domain when one is supplied. With no bbox, the union of the tile
+    footprints is used.
     """
     import rasterio
-    from rasterio.merge import merge
-    from rasterio.warp import calculate_default_transform, reproject, Resampling
-    from rasterio.windows import from_bounds
+    from rasterio.warp import reproject, Resampling, transform_bounds
 
     if not tile_paths:
         raise CudemError("no tiles to mosaic")
@@ -380,69 +417,69 @@ def mosaic_and_reproject_cudem(
     if target_res_m is None:
         raise CudemError("target_res_m is required when no domain is supplied")
 
-    if verbose:
-        print(f"  mosaicking {len(tile_paths)} tiles -> {target_crs} "
-              f"@ {target_res_m} m")
-
     resampling_enum = {
         "nearest": Resampling.nearest,
         "bilinear": Resampling.bilinear,
         "cubic": Resampling.cubic,
     }[resampling]
 
-    src_files = [rasterio.open(p) for p in tile_paths]
-    try:
-        mosaic, src_transform = merge(src_files, nodata=nodata)
-        src_crs = src_files[0].crs
-        src_meta = src_files[0].meta.copy()
-    finally:
-        for sf in src_files:
-            sf.close()
+    if bbox_lonlat is None:
+        xs, ys = [], []
+        for p in tile_paths:
+            with rasterio.open(p) as src:
+                l, b, r, t = transform_bounds(src.crs, "EPSG:4326", *src.bounds)
+            xs += [l, r]
+            ys += [b, t]
+        bbox_lonlat = (min(xs), min(ys), max(xs), max(ys))
 
-    src_h, src_w = mosaic.shape[1], mosaic.shape[2]
-    src_bounds = rasterio.transform.array_bounds(src_h, src_w, src_transform)
+    dst_transform, dst_w, dst_h = target_grid(bbox_lonlat, target_crs, target_res_m)
+    dst_bounds = rasterio.transform.array_bounds(dst_h, dst_w, dst_transform)
 
-    dst_transform, dst_w, dst_h = calculate_default_transform(
-        src_crs, target_crs, src_w, src_h, *src_bounds, resolution=target_res_m,
-    )
+    if verbose:
+        print(f"  warping {len(tile_paths)} tiles -> {target_crs} "
+              f"@ {target_res_m} m ({dst_h} x {dst_w})")
 
     dst_arr = np.full((dst_h, dst_w), nodata, dtype=np.float32)
-    reproject(
-        source=mosaic[0], destination=dst_arr,
-        src_transform=src_transform, src_crs=src_crs,
-        dst_transform=dst_transform, dst_crs=target_crs,
-        resampling=resampling_enum,
-        src_nodata=nodata, dst_nodata=nodata,
-    )
+    tile_arr = np.empty_like(dst_arr)
+    n_used = 0
+    src_meta = None
 
-    if bbox_lonlat is not None:
-        from rasterio.warp import transform_bounds
-        dst_bounds = transform_bounds("EPSG:4326", target_crs, *bbox_lonlat)
-        window = from_bounds(*dst_bounds, transform=dst_transform)
-        col_off = max(0, int(window.col_off))
-        row_off = max(0, int(window.row_off))
-        ncols = min(int(window.width), dst_w - col_off)
-        nrows = min(int(window.height), dst_h - row_off)
-        if ncols <= 0 or nrows <= 0:
-            raise CudemError(
-                "the crop bbox does not overlap the mosaic; check that the "
-                "domain bbox and the downloaded tiles refer to the same area"
+    for p in tile_paths:
+        with rasterio.open(p) as src:
+            if src_meta is None:
+                src_meta = src.meta.copy()
+            # Skip tiles whose footprint misses the output grid entirely.
+            tl, tb, tr, tt = transform_bounds(src.crs, target_crs, *src.bounds)
+            if (tr <= dst_bounds[0] or tl >= dst_bounds[2]
+                    or tt <= dst_bounds[1] or tb >= dst_bounds[3]):
+                continue
+            tile_arr.fill(nodata)
+            reproject(
+                source=rasterio.band(src, 1), destination=tile_arr,
+                src_crs=src.crs, src_nodata=src.nodata,
+                dst_transform=dst_transform, dst_crs=target_crs,
+                dst_nodata=nodata, resampling=resampling_enum,
+                warp_mem_limit=int(warp_mem_limit_mb),
             )
-        dst_arr = dst_arr[row_off:row_off + nrows, col_off:col_off + ncols]
-        dst_transform = rasterio.transform.Affine(
-            dst_transform.a, dst_transform.b,
-            dst_transform.c + col_off * dst_transform.a,
-            dst_transform.d, dst_transform.e,
-            dst_transform.f + row_off * dst_transform.e,
-        )
-        dst_h, dst_w = dst_arr.shape
+        fill = (dst_arr == nodata) & (tile_arr != nodata) & np.isfinite(tile_arr)
+        dst_arr[fill] = tile_arr[fill]
+        n_used += 1
 
-    dst_meta = src_meta.copy()
+    if n_used == 0:
+        raise CudemError(
+            "none of the tiles overlap the output grid; check that the domain "
+            "bbox and the downloaded tiles refer to the same area"
+        )
+
+    dst_meta = dict(src_meta)
     dst_meta.update({
+        "driver": "GTiff",
         "crs": target_crs, "transform": dst_transform,
         "width": dst_w, "height": dst_h, "nodata": nodata,
         "dtype": "float32", "compress": "lzw", "tiled": True, "count": 1,
     })
+    for k in ("blockxsize", "blockysize"):
+        dst_meta.pop(k, None)
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -455,5 +492,5 @@ def mosaic_and_reproject_cudem(
     return {
         "profile": dst_meta, "shape": (dst_h, dst_w),
         "transform": dst_transform, "crs": target_crs,
-        "n_tiles": len(tile_paths), "path": out_path,
+        "n_tiles": n_used, "path": out_path,
     }

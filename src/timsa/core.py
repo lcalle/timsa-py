@@ -75,6 +75,15 @@ import numpy as np
 
 MINUTES_PER_DAY = 1440
 
+# Inner-loop memory model, used by TimsaSimulation.auto_cell_chunk. One block
+# holds a float64 depth array of shape (steps_per_day, cell_chunk) plus bool
+# temporaries from the window/threshold comparisons. Measured peak with
+# tracemalloc is about 16 bytes per cell-step (8 for depth, the rest
+# temporaries and reduction buffers).
+BYTES_PER_CELL_STEP = 16
+DEFAULT_CHUNK_MEM_MB = 256
+MIN_CELL_CHUNK = 1_000
+
 GAUGE_INTERP_METHODS = ("linear", "sinusoidal", "hold")
 SURFACE_UPDATE_MODES = ("direct", "incremental")
 DAYLIGHT_BOUNDS = ("inclusive", "exclusive")
@@ -468,24 +477,47 @@ class TimsaSimulation:
         )
 
         ws_min_per_gauge = np.nanmin(self.water_surface, axis=0)   # (n_gauges,)
+        ws_max_per_gauge = np.nanmax(self.water_surface, axis=0)   # (n_gauges,)
 
         too_deep_mask = np.zeros_like(base_valid_mask)
+        too_dry_mask = np.zeros_like(base_valid_mask)
         valid_gz = (gz - 1)[base_valid_mask]
-        cell_ws_min = ws_min_per_gauge[valid_gz]
         cell_dem = inputs.dem[base_valid_mask]
+        cell_ws_min = ws_min_per_gauge[valid_gz]
+        cell_ws_max = ws_max_per_gauge[valid_gz]
         too_deep_mask[base_valid_mask] = cell_dem < (cell_ws_min - deepest_of_interest)
 
-        self.valid_mask = base_valid_mask & (~too_deep_mask)
+        # Mirror image of the deep test. The shallowest depth a cell ever sees
+        # is (dem - highest water surface at its gauge). A depth window
+        # (lo, hi) can only match when that depth <= hi, and a refugia
+        # threshold only when it is < 0 (submerged). A cell failing every
+        # such test stands dry above everything of interest at every step,
+        # so all accumulators are guaranteed zero. Coastal boxes are often
+        # mostly upland, so this can remove a large share of the grid.
+        min_depth = cell_dem - cell_ws_max
+        if config.depth_windows:
+            highest_of_interest = max(hi for (_, hi) in config.depth_windows.values())
+            never_in_window = min_depth > highest_of_interest
+        else:
+            never_in_window = np.ones_like(min_depth, dtype=bool)
+        if config.refugia_thresholds:
+            never_submerged = min_depth >= 0.0
+        else:
+            never_submerged = np.ones_like(min_depth, dtype=bool)
+        too_dry_mask[base_valid_mask] = never_in_window & never_submerged
+
+        self.valid_mask = base_valid_mask & (~too_deep_mask) & (~too_dry_mask)
         # Mask used for OUTPUT no-data: genuine no-data only (land / DEM-nodata
-        # / no gauge zone). Excludes the 'too deep' cells, which are inside the
-        # domain and provably contribute 0 to every metric, so their rasters
-        # should serialize 0, not no-data. (valid_mask above is the narrower
-        # COMPUTE mask that also drops the too-deep cells for speed.)
+        # / no gauge zone). Excludes the 'too deep' and 'too dry' cells, which
+        # are inside the domain and provably contribute 0 to every metric, so
+        # their rasters should serialize 0, not no-data. (valid_mask above is
+        # the narrower COMPUTE mask that drops both for speed.)
         self.base_valid_mask = base_valid_mask
         self.gauge_idx_flat = gz[self.valid_mask] - 1          # 0-based
         self.dem_flat = inputs.dem[self.valid_mask]
         self.n_valid = int(self.dem_flat.size)
         self.n_skipped_too_deep = int(too_deep_mask.sum())
+        self.n_skipped_too_dry = int(too_dry_mask.sum())
 
         # ---- accumulators --------------------------------------------------
         self.shape = inputs.dem.shape
@@ -533,12 +565,29 @@ class TimsaSimulation:
 
     # ------------------------------------------------------------------
 
+    def auto_cell_chunk(self, chunk_mem_mb: float = DEFAULT_CHUNK_MEM_MB) -> int:
+        """
+        Cells per inner block such that the block's working set stays near
+        `chunk_mem_mb`.
+
+        Per cell, per step of the day, a block holds one float64 depth value
+        plus a few bool temporaries from the window/threshold comparisons:
+        about BYTES_PER_CELL_STEP bytes. The chunk therefore scales inversely
+        with steps_per_day, so a 1-minute timestep gets a block 6x narrower
+        than a 6-minute one and the same peak memory. Results do not depend
+        on the chunk size.
+        """
+        budget = float(chunk_mem_mb) * 1024 * 1024
+        n = int(budget // (self.steps_per_day * BYTES_PER_CELL_STEP))
+        return max(MIN_CELL_CHUNK, n)
+
     def run(
         self,
         verbose: bool = True,
-        cell_chunk: int = 100_000,
+        cell_chunk: int | str | None = "auto",
         daily_callback: Callable[[int, dict, dict, "TimsaSimulation"], None] | None = None,
         progress_every: int = 30,
+        chunk_mem_mb: float = DEFAULT_CHUNK_MEM_MB,
     ) -> None:
         """
         Execute the simulation.
@@ -550,9 +599,13 @@ class TimsaSimulation:
         ----------
         verbose : bool
             Print periodic progress.
-        cell_chunk : int
-            Valid cells per inner block. Caps peak memory at roughly
-            steps_per_day * cell_chunk * 8 bytes per working array.
+        cell_chunk : int, 'auto', or None
+            Valid cells per inner block. 'auto' (or None, or <= 0) sizes the
+            block from `chunk_mem_mb` via `auto_cell_chunk`. An integer is
+            used as given; peak memory is then roughly
+            steps_per_day * cell_chunk * BYTES_PER_CELL_STEP bytes.
+        chunk_mem_mb : float
+            Working-set budget for one block when cell_chunk is 'auto'.
         daily_callback : callable or None
             Called at the end of each day as
                 daily_callback(day_index, flat_band, flat_below, sim)
@@ -566,6 +619,11 @@ class TimsaSimulation:
         timestep = self.config.timestep_min
         n_days = self.n_days
         want_daily = daily_callback is not None
+
+        if cell_chunk is None or cell_chunk == "auto" or int(cell_chunk) <= 0:
+            cell_chunk = self.auto_cell_chunk(chunk_mem_mb)
+        cell_chunk = int(cell_chunk)
+        self.cell_chunk_used = cell_chunk
 
         accum_band = {
             name: np.zeros(self.n_valid, dtype=np.float64)
@@ -599,10 +657,11 @@ class TimsaSimulation:
 
             for c0 in range(0, self.n_valid, cell_chunk):
                 c1 = min(c0 + cell_chunk, self.n_valid)
-                water_surface_t = day_block[:, self.gauge_idx_flat[c0:c1]]
-
+                # Fancy indexing returns a fresh array, so compute depth into
+                # it in place rather than allocating a second block-sized one.
                 # C convention: positive = dry, negative = submerged.
-                depth = self.dem_flat[np.newaxis, c0:c1] - water_surface_t
+                depth = day_block[:, self.gauge_idx_flat[c0:c1]]
+                np.subtract(self.dem_flat[np.newaxis, c0:c1], depth, out=depth)
 
                 for name, (d_low, d_high) in self.config.depth_windows.items():
                     in_band = (depth >= d_low) & (depth <= d_high)
@@ -661,6 +720,7 @@ class TimsaSimulation:
             "n_gauges": self.n_gauges,
             "n_valid_cells": self.n_valid,
             "n_skipped_too_deep": self.n_skipped_too_deep,
+            "n_skipped_too_dry": self.n_skipped_too_dry,
             "water_level_offset_m": self.inputs.water_level_offset_m,
             "constrain_daylight": self.config.constrain_daylight,
             "daylight_bounds": self.config.daylight_bounds,

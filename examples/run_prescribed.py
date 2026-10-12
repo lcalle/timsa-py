@@ -70,7 +70,8 @@ def main() -> None:
                          "interpolate the gauge record up")
     ap.add_argument("--gauge-interp", default="linear",
                     choices=("linear", "sinusoidal", "hold"))
-    ap.add_argument("--cell-chunk", type=int, default=100_000)
+    ap.add_argument("--cell-chunk", type=int, default=0,
+                    help="cells per block; 0 = auto from memory budget")
     ap.add_argument("--out", type=Path, default=Path("outputs"))
     ap.add_argument("--run-id", default="present_day")
     ap.add_argument("--daily-rasters", action="store_true",

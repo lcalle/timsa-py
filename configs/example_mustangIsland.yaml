@@ -69,7 +69,8 @@ simulation:
   daylight_bounds: "inclusive"           # inclusive | exclusive (exclusive = C reference)
   daylight_table: null                   # null -> computed from domain centroid
   water_level_offset_m: 0.0              # uniform vertical shift; 0 for present-day
-  cell_chunk: 100000
+  cell_chunk: auto                       # or an int; auto keeps peak memory near chunk_mem_mb
+  chunk_mem_mb: 256
 
 # Sign convention (C reference): POSITIVE IS DRY.
 #   depth = dem_elevation - water_surface

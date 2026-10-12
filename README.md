@@ -47,7 +47,23 @@ timsa run   configs/example_present_day.yaml   # one simulation
 
 `fetch` acquires whatever inputs a run needs and doesn't already have; `run`
 executes one simulation. If you bring your own DEM and water-level data you can
-skip straight to `run`. As a library:
+skip straight to `run`.
+
+To size a run before starting it, add `--dry-run`. It validates the config and
+prints the grid size, number of timesteps, cell-steps (cells x timesteps, which
+is what runtime scales with), and rough peak memory and output size:
+
+```bash
+timsa run configs/example_present_day.yaml --dry-run
+```
+
+Memory stays flat whatever the timestep: `simulation.cell_chunk: auto` (the
+default) sizes each inner block to `simulation.chunk_mem_mb` (default 256).
+Cells that stay deeper or drier than every depth window and threshold for the
+whole run are skipped, since their metrics are provably zero; they still
+appear as 0 in the output rasters.
+
+As a library:
 
 ```python
 from timsa import TimsaInputs, TimsaConfig, TimsaSimulation
@@ -142,7 +158,8 @@ Per cell, per depth window and threshold:
 - **Refugia time** — minutes under at most *d* metres of water, at several
   thresholds.
 
-Annual accumulators are written once at the end. Daily rasters are opt-in
+Annual accumulators are written once at the end, as float32 + LZW
+(area availability as uint8 0/1, with 255 as no-data). Daily rasters are opt-in
 (`output.write_daily` or `--daily-rasters`) and stream to disk from a single
 preallocated buffer as float32 + LZW.
 
