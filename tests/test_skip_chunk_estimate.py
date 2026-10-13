@@ -271,3 +271,33 @@ def test_area_available_raster_is_uint8(tmp_path):
     total = [p for p in paths if "time_integrated" in p.name][0]
     with rasterio.open(total) as s:
         assert s.dtypes[0] == "float32"
+
+
+# --- land (never-submerged) mask ------------------------------------------------
+
+def test_never_submerged_mask_matches_water_levels():
+    dem = np.linspace(-3.0, 2.0, 50)[None, :].repeat(6, 0)
+    sim, zones = _sim(dem, _tide(), {"shallow_band": (-1.5, 0.0)}, [0.5])
+    ws_max = np.nanmax(sim.water_surface, axis=0)[zones - 1]
+    expected = (dem - ws_max) >= 0
+    np.testing.assert_array_equal(sim.never_submerged_mask, expected)
+    assert 0 < sim.never_submerged_mask.sum() < dem.size
+    assert sim.describe()["n_never_submerged"] == int(expected.sum())
+
+
+def test_never_submerged_raster_is_written(tmp_path):
+    rasterio = pytest.importorskip("rasterio")
+    from rasterio.transform import from_origin
+    from timsa.metrics import RunResult, write_metric_rasters, never_submerged_path
+
+    dem = np.linspace(-3.0, 2.0, 40)[None, :].repeat(5, 0)
+    sim, _ = _sim(dem, _tide(), {"shallow_band": (-1.5, 0.0)}, [])
+    sim.run(verbose=False)
+    profile = {"driver": "GTiff", "width": 40, "height": 5, "count": 1,
+               "dtype": "float64", "crs": "EPSG:32614",
+               "transform": from_origin(0, 150, 30, 30)}
+    write_metric_rasters(RunResult(run_id="land", sim=sim, profile=profile), tmp_path)
+    with rasterio.open(never_submerged_path("land", tmp_path)) as s:
+        a = s.read(1)
+        assert s.dtypes[0] == "uint8"
+    np.testing.assert_array_equal(a == 1, sim.never_submerged_mask)

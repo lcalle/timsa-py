@@ -506,6 +506,13 @@ class TimsaSimulation:
             never_submerged = np.ones_like(min_depth, dtype=bool)
         too_dry_mask[base_valid_mask] = never_in_window & never_submerged
 
+        # Cells never under water at any step, whatever the metrics: the
+        # shallowest depth they see is still >= 0. This is "land" for the run,
+        # and is written out so maps can tell land apart from water that is
+        # simply outside every window (both have 0 minutes in a window).
+        self.never_submerged_mask = np.zeros_like(base_valid_mask)
+        self.never_submerged_mask[base_valid_mask] = min_depth >= 0.0
+
         self.valid_mask = base_valid_mask & (~too_deep_mask) & (~too_dry_mask)
         # Mask used for OUTPUT no-data: genuine no-data only (land / DEM-nodata
         # / no gauge zone). Excludes the 'too deep' and 'too dry' cells, which
@@ -721,6 +728,7 @@ class TimsaSimulation:
             "n_valid_cells": self.n_valid,
             "n_skipped_too_deep": self.n_skipped_too_deep,
             "n_skipped_too_dry": self.n_skipped_too_dry,
+            "n_never_submerged": int(self.never_submerged_mask.sum()),
             "water_level_offset_m": self.inputs.water_level_offset_m,
             "constrain_daylight": self.config.constrain_daylight,
             "daylight_bounds": self.config.daylight_bounds,

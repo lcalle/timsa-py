@@ -163,7 +163,7 @@ def estimate_run(cfg) -> RunEstimate:
         if o.write_annual:
             per_window = (4 if o.write_total else 0) + (4 if o.write_average else 0) + 1
             per_thr = (4 if o.write_total else 0) + (4 if o.write_average else 0)
-            per_cell_out = n_win * per_window + n_thr * per_thr
+            per_cell_out = n_win * per_window + n_thr * per_thr + 1   # + land mask
         out_mb = cells * per_cell_out / 2**20
         if o.write_daily and n_days is not None:
             out_mb += cells * 4 * n_metrics * n_days / 2**20

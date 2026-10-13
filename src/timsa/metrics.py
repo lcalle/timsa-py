@@ -295,7 +295,20 @@ def write_metric_rasters(
         if write_average:
             _write(arr / n_days, paths[("refugia_average", float(thr))])
 
+    # Land for this run: 1 where a cell was never under water, 0 where it was
+    # at some step. Lets a map show land separately from water that spent no
+    # time in a window, which is also 0 in the metric rasters.
+    never = getattr(run.sim, "never_submerged_mask", None)
+    if never is not None:
+        _write(never, never_submerged_path(run.run_id, out_dir),
+               out_dtype="uint8", nodata=AREA_NODATA)
+
     return written
+
+
+def never_submerged_path(run_id: str, out_dir: Path) -> Path:
+    """Path of the never-submerged (land) mask raster for a run."""
+    return Path(out_dir) / f"{run_id}__never_submerged.tif"
 
 
 # ---------------------------------------------------------------------------

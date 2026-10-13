@@ -1,6 +1,6 @@
 """TiMSA — Tidal Inundation Model of Shallow-water Availability."""
 
-__version__ = "0.2.0"
+__version__ = "1.3.0"
 
 from timsa.core import (
     TimsaInputs, TimsaConfig, TimsaSimulation,
