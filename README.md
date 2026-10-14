@@ -131,8 +131,9 @@ and the config keys that select them, are laid out with worked examples in
 cell 0.3 m under water has depth `-0.3`. Depth windows carry negative bounds —
 a band covering 0 to 1.5 m of water is `[-1.5, 0.0]`. Refugia thresholds stay
 positive, because they name a depth of water rather than an elevation. Getting
-this backwards produces a run that completes and reports zeros; the config
-parser rejects an all-positive window for that reason.
+this backwards produces a run that completes and reports zeros, so a window
+above the waterline (such as `[0.0, 0.5]`, ground up to 0.5 m above the water)
+runs but prints a warning.
 
 **Timestep and record interval are independent.** `record_interval_min` is the
 spacing of your water-level data; `timestep_min` is how often the simulation

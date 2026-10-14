@@ -47,9 +47,9 @@ def test_parses_a_minimal_config():
     assert cfg.refugia_thresholds == [0.2, 0.5]
 
 
-def test_positive_window_is_rejected_with_the_sign_rule():
-    with pytest.raises(ConfigError, match="POSITIVE IS DRY"):
-        RunConfig.from_dict(_cfg(depth_windows={"shallow_band": [0.0, 1.5]}))
+def test_window_above_waterline_is_accepted():
+    cfg = RunConfig.from_dict(_cfg(depth_windows={"near_flood": [0.0, 0.5]}))
+    assert cfg.depth_windows["near_flood"] == (0.0, 0.5)
 
 
 def test_manuscript_blocks_are_reported_not_silently_dropped():
@@ -278,9 +278,9 @@ def test_cli_dry_run_validates_config(tmp_path, capsys):
 def test_cli_bad_config_returns_nonzero(tmp_path, capsys):
     from timsa.cli import main
     p = tmp_path / "c.yaml"
-    p.write_text(yaml.safe_dump(_cfg(depth_windows={"b": [0.0, 1.5]})))
+    p.write_text(yaml.safe_dump(_cfg(depth_windows={"b": [1.5, 0.0]})))
     assert main(["run", str(p), "--dry-run"]) == 1
-    assert "POSITIVE IS DRY" in capsys.readouterr().err
+    assert "low exceeds high" in capsys.readouterr().err
 
 
 def test_cli_synthetic_run_end_to_end(tmp_path):

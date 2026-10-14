@@ -51,7 +51,9 @@ def _brute_force(dem, zones, ws, windows, thresholds, timestep):
     ({"shallow_band": (-1.5, 0.0)}, [0.2, 0.5]),
     ({"wet_and_edge": (-0.3, 0.4)}, []),       # window reaching above waterline
     ({}, [0.3]),                               # thresholds only
+    ({"near_flood": (0.0, 0.5)}, []),          # ground 0-0.5 m above the water
 ])
+@pytest.mark.filterwarnings("ignore:depth window")
 def test_skipped_cells_match_brute_force(windows, thresholds):
     # Grid from deep water (-6 m) to well above the highest tide (+3 m).
     dem = np.linspace(-6.0, 3.0, 60)[None, :].repeat(20, 0)
@@ -67,6 +69,16 @@ def test_skipped_cells_match_brute_force(windows, thresholds):
     for t in thresholds:
         np.testing.assert_array_equal(sim.time_below_threshold[float(t)],
                                       below[float(t)])
+
+
+def test_window_above_waterline_counts_dry_time_and_warns():
+    dem = np.linspace(-1.0, 2.0, 31)[None, :].repeat(4, 0)
+    with pytest.warns(UserWarning, match="above the water surface"):
+        sim, _ = _sim(dem, _tide(), {"near_flood": (0.0, 0.5)}, [])
+    sim.run(verbose=False)
+    t = sim.time_in_band["near_flood"]
+    assert t[:, np.isclose(dem[0], 0.6)].min() > 0          # just above high tide: counted
+    assert (t[:, dem[0] >= 1.0] == 0).all()        # far above the window: never
 
 
 def test_skipped_cells_serialize_as_zero_not_nodata():

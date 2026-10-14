@@ -403,14 +403,9 @@ def _parse_depth_windows(raw) -> dict:
             raise ConfigError(
                 f"depth_windows.{name} = [{lo}, {hi}]: low exceeds high"
             )
-        if lo >= 0.0 and hi > 0.0:
-            raise ConfigError(
-                f"depth_windows.{name} = [{lo}, {hi}] lies entirely above the "
-                f"waterline and would only ever match dry cells. This tool uses "
-                f"the C convention where POSITIVE IS DRY: depth = elevation - "
-                f"water_surface. A band covering 0-{hi} m of water is "
-                f"[{-hi}, {-lo}]."
-            )
+        # A window above the waterline (lo >= 0) is allowed: it measures time
+        # a cell stands that far above the water. TimsaConfig warns about it,
+        # since a sign slip there runs to completion and reports zeros.
         out[str(name)] = (lo, hi)
     return out
 

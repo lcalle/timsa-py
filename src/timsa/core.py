@@ -329,7 +329,8 @@ class TimsaConfig:
     Container for TiMSA simulation parameters.
 
     depth_windows use the C sign convention: POSITIVE IS DRY. A band covering
-    0 to 1.5 m of water is (-1.5, 0.0).
+    0 to 1.5 m of water is (-1.5, 0.0); (0.0, 0.5) is ground 0 to 0.5 m above
+    the water surface, which is allowed and warned about.
     """
 
     depth_windows: dict           # e.g. {'shallow_band': (-1.5, 0.0)}
@@ -388,11 +389,10 @@ class TimsaConfig:
                 )
             if lo >= 0.0 and hi > 0.0:
                 warnings.warn(
-                    f"depth window {name!r} = ({lo}, {hi}) lies entirely above "
-                    f"the waterline and will only ever match dry cells. This "
-                    f"port uses the C convention where POSITIVE IS DRY, so a "
-                    f"shallow band of 0-{hi} m of water is written "
-                    f"({-hi}, {-lo}).",
+                    f"depth window {name!r} = ({lo}, {hi}) lies above the "
+                    f"waterline: it counts time cells stand {lo:g} to {hi:g} m "
+                    f"above the water surface (POSITIVE IS DRY). If you meant "
+                    f"{lo:g} to {hi:g} m of water, write ({-hi}, {-lo}).",
                     stacklevel=3,
                 )
 
