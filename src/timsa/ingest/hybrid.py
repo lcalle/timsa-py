@@ -266,7 +266,7 @@ def load_hybrid_wl(cfg, domain, verbose: bool = True) -> HybridWL:
 
 
 def _coops_window(g):
-    """Simulation window for the CO-OPS fetch (mirrors cli._load_water_levels)."""
+    """Simulation window for the CO-OPS fetch (mirrors cli._sim_window)."""
     if g.start is not None:
         sim_start = dt.datetime(g.start.year, g.start.month, g.start.day,
                                 tzinfo=dt.timezone.utc)

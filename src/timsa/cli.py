@@ -66,7 +66,9 @@ def cmd_run(args) -> int:
             import rasterio
             with rasterio.open(cfg.land_mask_path) as src:
                 nodata |= src.read(1).astype(bool)
-        wl, interval = _load_water_levels(cfg)
+        wl, interval, gauges = _load_water_levels(cfg)
+        if gauges is not None and cfg.gauge_zones_path:
+            zones = _zones_matching_gauges(cfg, zones, gauges, dem, profile)
         cell_area = None
         print(f"      DEM {dem.shape}, {int((~nodata).sum())} data cells")
 
@@ -223,7 +225,15 @@ def cmd_fetch(args) -> int:
             print(f"      hybrid: {h.n_insitu} in-situ + {h.n_coops} "
                   f"CO-OPS gauge(s)")
         else:
-            ztable = table
+            # Download the records now, so gauges with no usable data are
+            # dropped before the zones are drawn; the run then finds the same
+            # records in the cache and the same columns in the same order.
+            print("      checking water-level records")
+            table = _usable_offsets(table)
+            _, _, ztable, dropped = _coops_records(cfg, table)
+            _report_dropped(dropped)
+            write_zone_stations(cfg, ztable)
+            print(f"      {len(ztable)} gauge(s) kept -> {zone_stations_path(cfg)}")
         raster, zprof = gauge_ref.build_gauge_reference_kdtree(
             ztable, profile, dem_array=dem,
         )
@@ -239,7 +249,11 @@ def cmd_fetch(args) -> int:
 # ---------------------------------------------------------------------------
 
 def _load_water_levels(cfg):
-    """Return (values, record_interval_min) for either gauge source."""
+    """
+    Return (values, record_interval_min, gauges). `gauges` is None for the
+    prescribed and hybrid sources; for CO-OPS it is a dict with the kept
+    station table ('kept') and the IDs that were tried ('tried').
+    """
     g = cfg.gauges
 
     if g.source == "prescribed":
@@ -254,18 +268,21 @@ def _load_water_levels(cfg):
             max_gap_records=g.max_gap_records,
         )
         print(f"      water levels: {wl.describe()}")
-        return wl.values, wl.record_interval_min
+        return wl.values, wl.record_interval_min, None
 
     if g.source == "hybrid":
         from timsa.ingest.hybrid import load_hybrid_wl
         h = load_hybrid_wl(cfg, cfg.domain)
         print(f"      water levels: {h.describe()}")
-        return h.values, h.record_interval_min
+        return h.values, h.record_interval_min, None
 
     from timsa.ingest import stations as st, vdatum as vd
-    from timsa.ingest.coops import build_multigauge_array
 
-    if g.stations_csv and Path(g.stations_csv).exists():
+    sidecar = zone_stations_path(cfg)
+    if sidecar is not None and sidecar.exists():
+        # Written by `timsa fetch`: the gauges the zone raster was drawn from.
+        table = st.load_stations(sidecar)
+    elif g.stations_csv and Path(g.stations_csv).exists():
         table = st.load_stations(g.stations_csv)
     else:
         table = st.discover_stations(cfg.domain, cache_dir=Path(g.cache_dir).parent)
@@ -276,34 +293,132 @@ def _load_water_levels(cfg):
             idw_fill=g.vdatum_idw_fill, idw_power=g.vdatum_idw_power,
             idw_k=g.vdatum_idw_k,
         )
+    tried = table["StationID"].astype(str).tolist()
+    table = _usable_offsets(table)
 
-    # Optional sub-year window; both default to the full calendar year.
-    # g.end is inclusive, and build_multigauge_array's grid is left-inclusive,
-    # so add a day to reach an exclusive upper bound.
+    values, ri, kept, dropped = _coops_records(cfg, table)
+    _report_dropped(dropped)
+
+    # MLLW -> NAVD88, per gauge, in the kept order.
+    offsets = vd.offsets_as_dict(kept)
+    shift = np.array([offsets[str(s)] for s in kept["StationID"]], dtype=np.float64)
+    return values + shift[np.newaxis, :], ri, {"kept": kept, "tried": tried}
+
+
+# ---------------------------------------------------------------------------
+# Gauges that drop out
+#
+# A station can be found near the domain yet have no usable record for the
+# year (fetch error, empty, all gaps) or no datum offset. Such gauges are
+# dropped, and the gauge-zone raster must be drawn from the gauges that remain
+# so that zone k always means column k-1 of the water-level table. `fetch`
+# writes the kept list beside the zone raster; `run` reads it, and if the
+# gauges still differ (an older fetch, or a record that vanished since),
+# redraws the zones in memory from the gauges it actually has.
+# ---------------------------------------------------------------------------
+
+def zone_stations_path(cfg) -> "Path | None":
+    """The kept-gauge table written next to the gauge-zone raster."""
+    if not cfg.gauge_zones_path:
+        return None
+    z = Path(cfg.gauge_zones_path)
+    return z.with_name(z.stem + "_stations.csv")
+
+
+def write_zone_stations(cfg, kept) -> None:
+    path = zone_stations_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    kept.to_csv(path, index=False)
+
+
+def _usable_offsets(table):
+    """Drop stations whose MLLW -> NAVD88 offset could not be resolved."""
+    from timsa.ingest import vdatum as vd
+    if vd.OFFSET_COLUMN not in table.columns:
+        return table
+    bad = table[vd.OFFSET_COLUMN].isna()
+    for _, r in table[bad].iterrows():
+        print(f"      dropping gauge {r['StationID']} {r.get('Name', '')}: "
+              f"no datum offset")
+    return _renumber(table[~bad])
+
+
+def _renumber(table):
+    out = table.reset_index(drop=True).copy()
+    if "gauge_idx" in out.columns:
+        out = out.drop(columns="gauge_idx")
+    out.insert(0, "gauge_idx", range(len(out)))
+    return out
+
+
+def _sim_window(g):
+    """(start, exclusive end) in UTC; both default to the full calendar year."""
     if g.start is not None:
-        sim_start = dt.datetime(g.start.year, g.start.month, g.start.day,
-                                tzinfo=dt.timezone.utc)
+        start = dt.datetime(g.start.year, g.start.month, g.start.day,
+                            tzinfo=dt.timezone.utc)
     else:
-        sim_start = dt.datetime(g.year, 1, 1, tzinfo=dt.timezone.utc)
+        start = dt.datetime(g.year, 1, 1, tzinfo=dt.timezone.utc)
     if g.end is not None:
-        end_excl = g.end + dt.timedelta(days=1)
-        sim_end = dt.datetime(end_excl.year, end_excl.month, end_excl.day,
-                              tzinfo=dt.timezone.utc)
+        # g.end is inclusive; build_multigauge_array's grid is left-inclusive.
+        e = g.end + dt.timedelta(days=1)
+        end = dt.datetime(e.year, e.month, e.day, tzinfo=dt.timezone.utc)
     else:
-        sim_end = dt.datetime(g.year + 1, 1, 1, tzinfo=dt.timezone.utc)
+        end = dt.datetime(g.year + 1, 1, 1, tzinfo=dt.timezone.utc)
+    return start, end
 
-    ri = g.record_interval_min or 6
+
+def _coops_records(cfg, table, verbose: bool = True):
+    """
+    Water levels for the stations in `table`, plus the stations that kept a
+    column. Returns (values, record_interval_min, kept_table, dropped_manifest)
+    with kept_table renumbered so gauge_idx matches the value columns.
+    """
+    from timsa.ingest.coops import build_multigauge_array
+
+    g = cfg.gauges
+    start, end = _sim_window(g)
     values, manifest, ri = build_multigauge_array(
-        table, g.year, sim_start, sim_end,
-        record_interval_min=ri, datum=g.datum,
-        cache_dir=g.cache_dir, hilo_interp=g.hilo_interp,
+        table, g.year, start, end,
+        record_interval_min=g.record_interval_min or 6, datum=g.datum,
+        cache_dir=g.cache_dir, hilo_interp=g.hilo_interp, verbose=verbose,
     )
+    ok = manifest["gauge_idx"].notna()
+    kept_ids = (manifest[ok].sort_values("gauge_idx")["station_id"]
+                .astype(str).tolist())
+    by_id = table.assign(_sid=table["StationID"].astype(str)).set_index("_sid")
+    kept = _renumber(by_id.loc[kept_ids])
+    return values, ri, kept, manifest[~ok]
 
-    # MLLW -> NAVD88, per gauge, in the manifest's kept order.
-    offsets = vd.offsets_as_dict(table)
-    kept = manifest[manifest["gauge_idx"].notna()].sort_values("gauge_idx")
-    shift = np.array([offsets[str(s)] for s in kept["station_id"]], dtype=np.float64)
-    return values + shift[np.newaxis, :], ri
+
+def _report_dropped(dropped) -> None:
+    why = {"error": "download failed", "empty": "no data for the period"}
+    for _, r in dropped.iterrows():
+        print(f"      dropping gauge {r['station_id']} {r.get('name', '')}: "
+              f"{why.get(r['record_type'], 'no usable records')}")
+
+
+def _zones_matching_gauges(cfg, zones, gauges, dem, profile):
+    """
+    Return a zone raster whose indices match `kept`, redrawing it if the
+    raster on disk was built from a different set of gauges.
+    """
+    from timsa.ingest import gauge_ref, stations as st
+
+    kept = gauges["kept"]
+    kept_ids = kept["StationID"].astype(str).tolist()
+    sidecar = zone_stations_path(cfg)
+    if sidecar.exists():
+        drawn = st.load_stations(sidecar)["StationID"].astype(str).tolist()
+    else:
+        # Fetched by an earlier release, which drew zones for every station
+        # it tried. Trust the raster when no gauge dropped out.
+        drawn = gauges["tried"]
+    if drawn == kept_ids:
+        return zones
+    print(f"      gauge zones were drawn for a different set of gauges; "
+          f"redrawing them for the {len(kept_ids)} with data")
+    raster, _ = gauge_ref.build_gauge_reference_kdtree(kept, profile, dem_array=dem)
+    return raster.astype(np.int32)
 
 
 def _daylight_table(cfg):
